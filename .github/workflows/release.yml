@@ -1,0 +1,97 @@
+name: Build and publish Android release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release version (for example v1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      APK_NAME: hyperos-password-fix.apk
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Validate version
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Enter a version such as v1.0.0."
+            exit 1
+          fi
+          refs="$(git ls-remote --tags origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}")"
+          tag_commit="$(awk 'END {print $1}' <<< "$refs")"
+          if [[ -n "$tag_commit" && "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::This tag already points to a different commit."
+            exit 1
+          fi
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          sdk_root="${ANDROID_HOME:?Android SDK is missing}"
+          echo "JAVA_HOME=${JAVA_HOME_17_X64:?JDK 17 is missing}" >> "$GITHUB_ENV"
+          if [[ ! -f "$sdk_root/platforms/android-36.1/android.jar" ||
+                ! -f "$sdk_root/build-tools/37.0.0/lib/d8.jar" ||
+                ! -x "$sdk_root/build-tools/37.0.0/aapt2" ||
+                ! -x "$sdk_root/build-tools/37.0.0/zipalign" ||
+                ! -x "$sdk_root/build-tools/37.0.0/apksigner" ]]; then
+            sdkmanager --sdk_root="$sdk_root" 'platforms;android-36.1' 'build-tools;37.0.0'
+          fi
+          echo "ANDROID_SDK_ROOT=$sdk_root" >> "$GITHUB_ENV"
+
+      - name: Build signed APK
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          PENGPAI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          PENGPAI_SIGNING_ALIAS: hyperos-password-fix
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$PENGPAI_KEYSTORE_PASSWORD" ]]; then
+            echo "::error::Configure the Android release signing secrets before publishing."
+            exit 1
+          fi
+          umask 077
+          key="$(mktemp "$RUNNER_TEMP/release-key.XXXXXXXX")"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$key"
+          unset KEYSTORE_BASE64
+          PENGPAI_SIGNING_KEY="$key" ./build.sh "$RUNNER_TEMP/$APK_NAME"
+          cd "$RUNNER_TEMP"
+          sha256sum "$APK_NAME" > "$APK_NAME.sha256"
+
+      - name: Publish APK and checksum
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apk="$RUNNER_TEMP/$APK_NAME"
+          if existing="$(gh release view "$RELEASE_TAG" --json isDraft,targetCommitish)"; then
+            if ! jq -e --arg sha "$GITHUB_SHA" '.isDraft and .targetCommitish == $sha' <<< "$existing" >/dev/null; then
+              echo "::error::This tag already has a published release or a draft for a different commit."
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "$apk" "$apk.sha256" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" "$apk" "$apk.sha256" \
+              --target "$GITHUB_SHA" --title "HyperOS Password Fix $RELEASE_TAG" --generate-notes
+          fi

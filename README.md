@@ -26,3 +26,14 @@ adb install -t -r build/hyperos-password-fix.apk
 ```
 
 应用名称为 **HyperOS Password Fix**，包名为 `app.hyperos.passwordfix`。它与旧版可同时安装，首次打开需重新授予 Shizuku 权限。同一包名的覆盖安装需使用相同签名密钥。
+
+## 通过 GitHub Actions 发布
+
+打开 **Actions → Build and publish Android release → Run workflow**，选择 `main`，
+填写新的版本标签，例如 `v1.0.0`。构建成功后，工作流会把签名 APK 和
+SHA-256 校验文件上传到对应的 **Releases**。
+
+工作流使用仓库的 `ANDROID_RELEASE_KEYSTORE_BASE64`（PKCS#12 密钥库的 Base64）
+和 `ANDROID_RELEASE_KEYSTORE_PASSWORD` 两个 Actions secrets。密钥别名为
+`hyperos-password-fix`。首次配置后请保管好同一份密钥库及密码，后续版本继续使用。
+APK 仍用上面的 `adb install -t -r` 安装。已安装且签名不同的 APK 无法覆盖更新。
